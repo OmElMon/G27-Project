@@ -1,20 +1,17 @@
-'''
+"""
+UGV Subsystem for UAV-UGV Coordination System
+==============================================
 This module implements the UGV (leader) in the leader-follower problem.
 
-This is a refactored version of Initial_UGV.py, converted to a class structure.
-
 RESPONSIBILITIES:
+----------------
 - Spawn and control the UGV vehicle in CARLA
 - Navigate via autopilot or scripted path (using BasicAgent)
 - Publish position updates to the Coordination Platform
 - Detect when destination is reached
 
-TO DOS:
-- Decide on location publishing and implement it
-
-
 Owner: Sean Bowden
-''' 
+"""
 
 import carla
 import random
@@ -39,13 +36,14 @@ except ImportError:
     AGENTS_AVAILABLE = False
 
 # Import our modules
-from config import UGV_CONFIG, SystemState
+from config import UGV_CONFIG, TOPICS, SystemState
+from message_broker import MessageBroker, Message, create_position_message, create_status_message
+
 
 class NavigationMode:
     """Navigation mode options."""
     AUTOPILOT = "autopilot"
     SCRIPTED = "scripted"
-    MANUAL = "manual"
 
 
 class UGVSubsystem:
@@ -59,23 +57,26 @@ class UGVSubsystem:
     4. Destination detection
     
     Usage:
-        ugv = UGVSubsystem(world)
+        broker = MessageBroker()
+        ugv = UGVSubsystem(world, broker)
         ugv.initialize()
         ugv.set_navigation_mode('scripted', destination=some_location)
         
-        # In main loop:
+        In main loop:
         ugv.update()
     """
     
-    def __init__(self, world: carla.World, config: Dict = None):
+    def __init__(self, world: carla.World, broker: MessageBroker, config: Dict = None):
         """
         Initialize the UGV Subsystem.
         
         Args:
             world: CARLA world object
+            broker: MessageBroker for communication
             config: Configuration dictionary (uses UGV_CONFIG defaults if None)
         """
         self.world = world
+        self.broker = broker
         self.config = config or UGV_CONFIG
         
         # CARLA objects
@@ -95,6 +96,8 @@ class UGVSubsystem:
         
         # Timing
         self.last_update_time = time.time()
+        self.last_broadcast_time = 0.0
+        self.broadcast_interval = 0.1  # Broadcast position at 10Hz
         
         # Status
         self.current_status = SystemState.IDLE
@@ -102,7 +105,8 @@ class UGVSubsystem:
         
         print("[UGV] Subsystem created")
     
-    def initialize(self, spawn_point: Optional[carla.Transform] = None,
+    def initialize(self, 
+                   spawn_point: Optional[carla.Transform] = None,
                    blueprint_filter: str = None) -> bool:
         """
         Initialize and spawn the UGV vehicle.
@@ -188,7 +192,7 @@ class UGVSubsystem:
             
         elif mode == NavigationMode.SCRIPTED:
             if not AGENTS_AVAILABLE:
-                print("[UGV] Scripted navigation unavailable - CARLA agents not found")
+                print("[UGV] Scripted navigation unavailable: CARLA agents not found")
                 print("[UGV] Falling back to autopilot")
                 return self.set_navigation_mode(NavigationMode.AUTOPILOT)
             
@@ -221,8 +225,10 @@ class UGVSubsystem:
             
             # Generate path
             grp = GlobalRoutePlanner(self.world.get_map(), 1.0)
-            path = grp.trace_route(self.vehicle.get_location(),
-                                   self.final_destination)
+            path = grp.trace_route(
+                self.vehicle.get_location(),
+                self.final_destination
+            )
             
             if not path:
                 print("[UGV] Failed to generate path")
@@ -235,16 +241,11 @@ class UGVSubsystem:
             print(f"[UGV] Destination: ({destination.x:.1f}, {destination.y:.1f})")
             
             return True
-            
-        elif mode == NavigationMode.MANUAL:
-            # Disable autopilot for manual control
-            self.vehicle.set_autopilot(False)
-            print("[UGV] Manual mode - vehicle ready for external control")
-            return True
         
         return False
     
-    def draw_path_markers(self, color: carla.Color = None,
+    def draw_path_markers(self, 
+                          color: carla.Color = None,
                           lifetime: float = 90.0) -> None:
         """
         Draw path markers in the CARLA world for visualization.
@@ -267,14 +268,10 @@ class UGVSubsystem:
                 life_time=lifetime,
                 persistent_lines=True
             )
-        
-        print(f"[UGV] Drew {len(self.path_waypoints)} path markers")
     
     def update(self) -> bool:
         """
         Update the UGV for one simulation tick.
-        
-        This should be called every tick from your main loop.
         
         Returns:
             True if update successful, False if destination reached or error
@@ -295,11 +292,17 @@ class UGVSubsystem:
             if self.agent.done():
                 self.destination_reached = True
                 print("[UGV] Reached final destination!")
+                self._publish_status("Destination reached")
                 return False
             
             # Get and apply control from agent
             control = self.agent.run_step()
             self.vehicle.apply_control(control)
+        
+        # Broadcast position at configured interval
+        if current_time - self.last_broadcast_time >= self.broadcast_interval:
+            self._broadcast_position()
+            self.last_broadcast_time = current_time
         
         return True
     
@@ -319,6 +322,45 @@ class UGVSubsystem:
             self.current_velocity = distance / dt
         
         self.last_position = current_pos
+    
+    def _broadcast_position(self) -> None:
+        """Publish current position to the message broker."""
+        if self.vehicle is None:
+            return
+        
+        transform = self.vehicle.get_transform()
+        location = transform.location
+        rotation = transform.rotation
+        
+        position_data = create_position_message(
+            x=location.x,
+            y=location.y,
+            z=location.z,
+            yaw=rotation.yaw,
+            velocity=self.current_velocity
+        )
+        
+        self.broker.publish(
+            TOPICS['UGV_POSITION'],
+            position_data,
+            source='UGVSubsystem'
+        )
+    
+    def _publish_status(self, message: str) -> None:
+        """Publish status update to message broker."""
+        status_data = create_status_message(
+            state=self.current_status,
+            message=message,
+            details={
+                'destination_reached': self.destination_reached,
+                'velocity': self.current_velocity
+            }
+        )
+        self.broker.publish(
+            TOPICS['UGV_STATUS'],
+            status_data,
+            source='UGVSubsystem'
+        )
     
     def get_location(self) -> Optional[carla.Location]:
         """Get current vehicle location."""
@@ -343,6 +385,7 @@ class UGVSubsystem:
     def has_reached_destination(self) -> bool:
         """Check if UGV has reached its destination."""
         return self.destination_reached
+    
     
     def cleanup(self) -> None:
         """
@@ -473,7 +516,7 @@ if __name__ == '__main__':
     This recreates the behavior of the original Initial_UGV.py script.
     """
     print("Testing UGV Subsystem...")
-    print("Make sure CARLA server is running!")
+    print("Make sure CARLA server is running")
     
     ugv = None
     
@@ -484,8 +527,18 @@ if __name__ == '__main__':
         world = client.get_world()
         print("Connected to CARLA")
         
+        # Create message broker (for testing, we'll just print received messages)
+        broker = MessageBroker()
+        
+        # Subscribe to UGV position to verify publishing works
+        def on_ugv_position(msg):
+            data = msg.data
+            print(f"[Broker] UGV Position: ({data['x']:.1f}, {data['y']:.1f}) "
+                  f"vel={data['velocity']:.1f} m/s")
+        broker.subscribe(TOPICS['UGV_POSITION'], on_ugv_position)
+        
         # Create UGV subsystem
-        ugv = UGVSubsystem(world)
+        ugv = UGVSubsystem(world, broker)
         
         # Initialize
         if not ugv.initialize():

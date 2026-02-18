@@ -1,4 +1,6 @@
 """
+UAV Subsystem for UAV-UGV Coordination System
+==============================================
 This module implements the UAV (follower) in the leader-follower problem.
 
 ARCHITECTURE OVERVIEW:
@@ -8,23 +10,23 @@ Since CARLA doesn't have native UAV support, we implement the UAV as:
 2. A kinematic controller that simulates realistic flight behavior
 3. Attached sensors (RGB camera) for visual tracking
 
-The UAV doesn't teleport to its target, it moves smoothly with velocity and
-acceleration constraints, making it possible to actually "lose" the target
-if the UGV moves too fast or erratically.
+The UAV moves smoothly with velocity and acceleration constraints, making it 
+possible to actually "lose" the target if the UGV moves too fast or erratically.
 
 KINEMATIC MODEL:
 ---------------
-We use a simple but effective kinematic model:
+We use a simple kinematic model:
 - Position updates based on velocity
 - Velocity changes limited by max acceleration
 - Speed capped at max velocity
 - Separate limits for horizontal and vertical movement
 
-This is NOT a full quadrotor dynamics model (no rotor physics, wind, etc.)
-but it's sufficient for demonstrating our coordination algorithms.
-
 INTEGRATION:
-TODO: Decide on how we want to implement subsystem communication and implement that communication
+-----------
+The UAV Subsystem:
+- Subscribes to: 'coordination/uav_waypoint' (where to go)
+- Publishes to: 'uav/position' (where it currently is)
+- Publishes to: 'uav/status' (current state)
 
 Owner: Sean Bowden
 """
@@ -35,8 +37,8 @@ import time
 from typing import Optional, Tuple, Dict, Any
 from dataclasses import dataclass
 
-# Import our modules
-from config import UAV_CONFIG, SystemState
+from config import UAV_CONFIG, TOPICS, SystemState
+from message_broker import MessageBroker, Message, create_position_message, create_status_message
 
 
 @dataclass
@@ -45,7 +47,6 @@ class UAVState:
     Represents the complete state of the UAV at a point in time.
     
     We track both position and velocity to implement smooth motion.
-    Using a dataclass keeps this clean and gives us easy copying.
     """
     # Position in CARLA world coordinates (meters)
     x: float = 0.0
@@ -67,7 +68,7 @@ class UAVState:
         return math.sqrt(self.vx**2 + self.vy**2 + self.vz**2)
     
     def get_horizontal_speed(self) -> float:
-        """Calculate horizontal speed (ignoring vertical component)."""
+        """Calculate horizontal speed."""
         return math.sqrt(self.vx**2 + self.vy**2)
     
     def get_position(self) -> Tuple[float, float, float]:
@@ -79,7 +80,7 @@ class UAVState:
         return math.sqrt((self.x - x)**2 + (self.y - y)**2 + (self.z - z)**2)
     
     def horizontal_distance_to(self, x: float, y: float) -> float:
-        """Calculate horizontal distance to a point (ignoring altitude)."""
+        """Calculate horizontal distance to a point."""
         return math.sqrt((self.x - x)**2 + (self.y - y)**2)
 
 
@@ -117,7 +118,7 @@ class UAVController:
         # Current state
         self.state = UAVState()
         
-        # Target position (where we want to go)
+        # Target position
         self.target_x: float = 0.0
         self.target_y: float = 0.0
         self.target_z: float = self.config['default_altitude']
@@ -162,8 +163,6 @@ class UAVController:
         """
         Update UAV state for one time step.
         
-        This is the core control loop that implements smooth pursuit.
-        
         Args:
             dt: Time step in seconds (time since last update)
             
@@ -200,7 +199,7 @@ class UAVController:
                 dir_y = dy / horizontal_dist
                 
                 # Calculate desired speed based on distance
-                # Slow down as we approach target (proportional control)
+                # Slow down as we approach target
                 desired_horizontal_speed = min(
                     self.max_speed,
                     horizontal_dist * 2.0  # Gain factor - adjust for responsiveness
@@ -252,7 +251,7 @@ class UAVController:
         self.state.z += self.state.vz * dt
         
         # === UPDATE ORIENTATION ===
-        # Yaw: face direction of travel (or target yaw if specified)
+        # Yaw: face direction of travel
         if self.target_yaw is not None:
             desired_yaw = self.target_yaw
         elif self.state.get_horizontal_speed() > 0.5:  # Only update if moving
@@ -284,25 +283,29 @@ class UAVSubsystem:
     This class:
     1. Spawns/manages the UAV actor in CARLA
     2. Runs the kinematic controller
-    3. Manages sensors (camera)
+    3. Handles communication via the message broker
+    4. Manages sensors (camera)
     
     Usage:
-        uav = UAVSubsystem(world)
+        broker = MessageBroker()
+        uav = UAVSubsystem(world, broker)
         uav.initialize(start_x, start_y, start_z)
         
-        # In your main loop:
+        In main loop:
         uav.update()
     """
     
-    def __init__(self, world: carla.World, config: Dict = None):
+    def __init__(self, world: carla.World, broker: MessageBroker, config: Dict = None):
         """
         Initialize the UAV Subsystem.
         
         Args:
             world: CARLA world object
+            broker: MessageBroker for communication
             config: Configuration dictionary (uses UAV_CONFIG defaults if None)
         """
         self.world = world
+        self.broker = broker
         self.config = config or UAV_CONFIG
         
         # Initialize controller
@@ -316,6 +319,9 @@ class UAVSubsystem:
         self.is_initialized = False
         self.last_update_time = time.time()
         self.current_status = SystemState.IDLE
+        
+        # Subscribe to waypoint commands from coordination platform
+        self.broker.subscribe(TOPICS['UAV_WAYPOINT'], self._on_waypoint_received)
         
         # Camera image storage (most recent frame)
         self.latest_camera_image = None
@@ -337,13 +343,11 @@ class UAVSubsystem:
             bp_lib = self.world.get_blueprint_library()
             
             # === SPAWN UAV ACTOR ===
-            # We'll use a small prop for visibility, but you could make this invisible
-            
-            # Try to find a small prop, fall back to a simple box if not available
+            # TODO: make custom mesh for uav later (if time permits)
             uav_bp = None
             prop_options = [
-                'static.prop.warningaccident',  # Small warning sign - visible but small
-                'static.prop.box01',             # Simple box
+                'static.prop.warningaccident',
+                'static.prop.box01',
             ]
             
             for prop_name in prop_options:
@@ -356,7 +360,6 @@ class UAVSubsystem:
             # If no prop found, we'll create a sensor-only platform (invisible UAV)
             if uav_bp is None:
                 print("[UAV] Warning: No suitable prop found. UAV will be invisible (sensor-only).")
-                # We'll just track position without a visible actor
                 self.actor = None
             else:
                 # Spawn the prop at the starting position
@@ -367,13 +370,12 @@ class UAVSubsystem:
                 
                 self.actor = self.world.spawn_actor(uav_bp, spawn_transform)
                 
-                # CRITICAL: Disable physics so it doesn't fall!
+                # Disable physics so it doesn't fall
                 self.actor.set_simulate_physics(False)
                 
                 print(f"[UAV] Spawned actor: {self.actor.type_id} at ({x:.1f}, {y:.1f}, {z:.1f})")
             
             # === ATTACH CAMERA SENSOR ===
-            # This gives the UAV "eyes" to see the UGV
             camera_bp = bp_lib.find('sensor.camera.rgb')
             camera_bp.set_attribute('image_size_x', '640')
             camera_bp.set_attribute('image_size_y', '480')
@@ -393,7 +395,7 @@ class UAVSubsystem:
                     attach_to=self.actor
                 )
             else:
-                # Spawn camera at UAV position (will be moved manually)
+                # Spawn camera at UAV position
                 camera_transform.location = carla.Location(x=x, y=y, z=z-1)
                 self.camera = self.world.spawn_actor(camera_bp, camera_transform)
             
@@ -409,6 +411,9 @@ class UAVSubsystem:
             self.current_status = SystemState.TRACKING
             self.last_update_time = time.time()
             
+            # Publish initial status
+            self._publish_status("UAV initialized and ready")
+            
             return True
             
         except Exception as e:
@@ -419,9 +424,6 @@ class UAVSubsystem:
     def update(self) -> None:
         """
         Update the UAV state for one tick.
-        
-        This should be called every simulation tick from your main loop.
-        It updates the kinematic controller and moves the CARLA actor.
         """
         if not self.is_initialized:
             return
@@ -449,6 +451,9 @@ class UAVSubsystem:
                 carla.Rotation(pitch=-45, yaw=state.yaw, roll=0)
             )
             self.camera.set_transform(camera_transform)
+        
+        # Publish current position
+        self._publish_position()
     
     def set_target(self, x: float, y: float, z: float, yaw: Optional[float] = None) -> None:
         """
@@ -479,25 +484,57 @@ class UAVSubsystem:
         """Check if UAV has reached its target."""
         return self.controller.is_at_target
     
+    def _on_waypoint_received(self, message: Message) -> None:
+        """
+        Callback when a new waypoint is received from Coordination Platform.
+        
+        This is automatically called by the message broker when a message
+        is published to the UAV_WAYPOINT topic.
+        """
+        data = message.data
+        x = data.get('x', self.controller.target_x)
+        y = data.get('y', self.controller.target_y)
+        z = data.get('z', self.controller.target_z)
+        yaw = data.get('yaw', None)
+        
+        self.set_target(x, y, z, yaw)
+    
     def _on_camera_image(self, image: carla.Image) -> None:
         """
         Callback when camera captures a new frame.
-        
-        For now, we just store the latest image. This could be extended
-        for computer vision tasks (detecting the UGV, etc.)
         """
         self.latest_camera_image = image
-        # You could process the image here:
-        # - Convert to numpy array
-        # - Run object detection
-        # - Check if UGV is visible
+    
+    def _publish_position(self) -> None:
+        """Publish current position to the message broker."""
+        state = self.controller.state
+        position_data = create_position_message(
+            x=state.x,
+            y=state.y,
+            z=state.z,
+            yaw=state.yaw,
+            velocity=state.get_speed()
+        )
+        self.broker.publish(TOPICS['UAV_POSITION'], position_data, source='UAVSubsystem')
+    
+    def _publish_status(self, message: str) -> None:
+        """Publish status update to the message broker."""
+        status_data = create_status_message(
+            state=self.current_status,
+            message=message,
+            details={
+                'distance_to_target': self.controller.get_distance_to_target(),
+                'speed': self.controller.state.get_speed()
+            }
+        )
+        self.broker.publish(TOPICS['UAV_STATUS'], status_data, source='UAVSubsystem')
     
     def cleanup(self) -> None:
         """
         Clean up CARLA actors.
         
         IMPORTANT: Always call this when done to prevent actors
-        from persisting in the simulation!
+        from persisting in the simulation
         """
         if self.camera:
             self.camera.stop()
@@ -524,7 +561,6 @@ if __name__ == '__main__':
     import sys
     
     print("Testing UAV Subsystem...")
-    print("Make sure CARLA server is running!")
     
     try:
         # Connect to CARLA
@@ -533,10 +569,12 @@ if __name__ == '__main__':
         world = client.get_world()
         print("Connected to CARLA")
         
-        # Create and initialize UAV
-        uav = UAVSubsystem(world)
+        # Create message broker
+        broker = MessageBroker()
         
-        # Get a spawn point for reference
+        # Create and initialize UAV
+        uav = UAVSubsystem(world, broker)
+        
         spawn_points = world.get_map().get_spawn_points()
         start = spawn_points[0].location
         
@@ -563,8 +601,6 @@ if __name__ == '__main__':
         last_print_time = time.time()
         while True:
             world.wait_for_tick()
-            
-            # Update UAV
             uav.update()
             
             # Check if reached waypoint

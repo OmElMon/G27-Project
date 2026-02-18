@@ -3,6 +3,8 @@ Configuration file for UAV-UGV Coordination System
 ===================================================
 This file contains all shared constants, default parameters, and configuration
 values used across the different subsystems.
+
+Owner: Sean Bowden
 """
 
 # =============================================================================
@@ -35,18 +37,18 @@ UAV_CONFIG = {
     # and control it with disabled physics. This prop will represent our drone.
     # Options: 'static.prop.box01', 'static.prop.briefcase', etc.
     # We'll use a small object or create an invisible sensor platform
-    'blueprint': None,  # None = invisible sensor platform (TODO: find a prop or upload custom prop)
+    'blueprint': None,  # None = invisible sensor platform (just sensors, no mesh)
     
     # Physical constraints (kinematic model)
     # These values simulate a medium-sized quadcopter
-    'max_speed': 15.0,              # m/s (about 54 km/h - typical for commercial drones)
-    'max_acceleration': 5.0,        # m/s^2 (how quickly it can speed up/slow down)
-    'max_vertical_speed': 8.0,      # m/s (climbing/descending rate)
+    'max_speed': 15.0,              # m/s
+    'max_acceleration': 5.0,        # m/s^2
+    'max_vertical_speed': 8.0,      # m/s
     'max_yaw_rate': 90.0,           # degrees/s (how fast it can rotate)
     
     # Default follow parameters
-    'default_altitude': 30.0,       # meters above ground
-    'default_follow_distance': 15.0, # meters behind the UGV
+    'default_altitude': 30.0,
+    'default_follow_distance': 15.0,
     
     # Control loop settings
     'position_tolerance': 2.0,      # meters - considered "at target" if within this distance
@@ -57,7 +59,7 @@ UAV_CONFIG = {
 # COORDINATION PLATFORM CONFIGURATION
 # =============================================================================
 COORDINATION_CONFIG = {
-    # Communication timeout settings (from state diagram - can change these later)
+    # Communication timeout settings
     'position_timeout': 3.0,        # seconds - triggers "target lost" state
     'search_timeout': 60.0,         # seconds - max time in search mode before giving up
     
@@ -67,12 +69,44 @@ COORDINATION_CONFIG = {
 }
 
 # =============================================================================
+# MESSAGE BROKER CONFIGURATION
+# =============================================================================
+# Topic names for the pub/sub system
+# naming convention: subsystem/data_type
+TOPICS = {
+    # UGV publishes its position and status
+    'UGV_POSITION': 'ugv/position',
+    'UGV_STATUS': 'ugv/status',
+    
+    # UAV publishes its position and status
+    'UAV_POSITION': 'uav/position',
+    'UAV_STATUS': 'uav/status',
+    
+    # Coordination platform publishes waypoints for UAV
+    'UAV_WAYPOINT': 'coordination/uav_waypoint',
+    
+    # System control messages
+    'SYSTEM_COMMAND': 'system/command',
+    'SYSTEM_STATUS': 'system/status',
+}
+
+# =============================================================================
+# DATA LOGGER CONFIGURATION
+# =============================================================================
+LOGGER_CONFIG = {
+    'log_directory': './logs',
+    'log_interval': 0.5,            # seconds between log entries
+    'log_to_console': True,         # print logs to terminal
+    'log_to_file': True,            # save logs to CSV
+}
+
+# =============================================================================
 # USER INTERFACE CONFIGURATION
 # =============================================================================
 UI_CONFIG = {
     'spectator_distance': 20.0,     # meters behind vehicle
     'spectator_height': 15.0,       # meters above vehicle
-    'spectator_pitch': -30.0,       # degrees (looking down)
+    'spectator_pitch': -30.0,       # degrees
 }
 
 # =============================================================================
