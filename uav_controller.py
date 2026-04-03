@@ -582,7 +582,8 @@ if __name__ == '__main__':
         uav.initialize(start.x, start.y, start.z + 30)
         
         # Get spectator to watch the UAV
-        spectator = world.get_spectator()
+        from ugv_controller import SpectatorController
+        spec_controller = SpectatorController(world)
         
         # Define some test waypoints
         waypoints = [
@@ -610,12 +611,8 @@ if __name__ == '__main__':
                 print(f"Moving to waypoint {waypoint_idx + 1}: {waypoints[waypoint_idx]}")
             
             # Update spectator to follow UAV
-            pos = uav.get_position()
-            spec_transform = carla.Transform(
-                carla.Location(x=pos[0] - 30, y=pos[1], z=pos[2] + 20),
-                carla.Rotation(pitch=-30, yaw=0, roll=0)
-            )
-            spectator.set_transform(spec_transform)
+            state = uav.get_state()
+            spec_controller.follow_position(state.x, state.y, state.z, state.yaw)
             
             # Print status periodically
             if time.time() - last_print_time > 2.0:

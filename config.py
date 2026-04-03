@@ -35,8 +35,6 @@ UGV_CONFIG = {
 UAV_CONFIG = {
     # Since CARLA doesn't have native UAV support, we use a static prop
     # and control it with disabled physics. This prop will represent our drone.
-    # Options: 'static.prop.box01', 'static.prop.briefcase', etc.
-    # We'll use a small object or create an invisible sensor platform
     'blueprint': None,  # None = invisible sensor platform (just sensors, no mesh)
     
     # Physical constraints (kinematic model)
@@ -48,7 +46,7 @@ UAV_CONFIG = {
     
     # Default follow parameters
     'default_altitude': 30.0,
-    'default_follow_distance': 15.0,
+    'default_follow_distance': 25.0,
     
     # Control loop settings
     'position_tolerance': 2.0,      # meters - considered "at target" if within this distance
@@ -107,6 +105,7 @@ UI_CONFIG = {
     'spectator_distance': 20.0,     # meters behind vehicle
     'spectator_height': 15.0,       # meters above vehicle
     'spectator_pitch': -30.0,       # degrees
+    'spectator_smoothing': 0.08,    # lerp factor per tick (0.0=frozen, 1.0=instant snap)
 }
 
 # =============================================================================

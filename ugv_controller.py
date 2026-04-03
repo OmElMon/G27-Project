@@ -81,6 +81,7 @@ class UGVSubsystem:
         
         # CARLA objects
         self.vehicle: Optional[carla.Vehicle] = None
+        self.camera: Optional[carla.Sensor] = None
         self.agent: Optional['BasicAgent'] = None
         
         # State tracking
@@ -98,11 +99,21 @@ class UGVSubsystem:
         self.last_update_time = time.time()
         self.last_broadcast_time = 0.0
         self.broadcast_interval = 0.1  # Broadcast position at 10Hz
+
+        # Path marker visualization
+        self.show_path_markers = False
+        self.marker_color: Optional[carla.Color] = None
+        self.marker_lifetime = 2.0  # seconds — short so stale markers expire quickly
+        self.last_marker_draw_time = 0.0
+        self.marker_redraw_interval = 1.0  # redraw before markers expire
         
         # Status
         self.current_status = SystemState.IDLE
         self.destination_reached = False
-        
+
+        # Camera image storage (most recent frame)
+        self.latest_camera_image = None
+
         print("[UGV] Subsystem created")
     
     def initialize(self, 
@@ -151,10 +162,30 @@ class UGVSubsystem:
             loc = self.vehicle.get_location()
             self.last_position = (loc.x, loc.y, loc.z)
             self.last_position_time = time.time()
-            
+
+            # === ATTACH CAMERA SENSOR ===
+            camera_bp = bp_lib.find('sensor.camera.rgb')
+            camera_bp.set_attribute('image_size_x', '640')
+            camera_bp.set_attribute('image_size_y', '480')
+            camera_bp.set_attribute('fov', '90')
+
+            # Camera transform relative to vehicle (forward-facing, mounted on roof)
+            camera_transform = carla.Transform(
+                carla.Location(x=1.5, y=0, z=2.0),  # Front of vehicle, roof height
+                carla.Rotation(pitch=-10, yaw=0, roll=0)  # Slightly angled down
+            )
+
+            self.camera = self.world.spawn_actor(
+                camera_bp,
+                camera_transform,
+                attach_to=self.vehicle
+            )
+            self.camera.listen(self._on_camera_image)
+            print("[UGV] Camera sensor attached")
+
             self.is_initialized = True
             self.current_status = SystemState.TRACKING
-            
+
             return True
             
         except Exception as e:
@@ -244,30 +275,81 @@ class UGVSubsystem:
         
         return False
     
-    def draw_path_markers(self, 
-                          color: carla.Color = None,
-                          lifetime: float = 90.0) -> None:
+    def set_destination(self, destination: carla.Location) -> bool:
         """
-        Draw path markers in the CARLA world for visualization.
-        
+        Change the UGV's destination mid-path without recreating the agent.
+
+        Only works in scripted navigation mode. Replaces the current route
+        with a new one from the vehicle's current position to the new destination.
+
+        Args:
+            destination: New target location
+
+        Returns:
+            True if reroute succeeded, False otherwise
+        """
+        if not self.is_initialized or self.vehicle is None:
+            print("[UGV] Cannot set destination - not initialized")
+            return False
+
+        if self.navigation_mode != NavigationMode.SCRIPTED or self.agent is None:
+            print("[UGV] Cannot set destination - not in scripted mode")
+            return False
+
+        self.final_destination = destination
+        self.destination_reached = False
+
+        # BasicAgent.set_destination replaces the current route
+        self.agent.set_destination(destination)
+
+        # Regenerate path waypoints for visualization
+        grp = GlobalRoutePlanner(self.world.get_map(), 1.0)
+        self.path_waypoints = grp.trace_route(
+            self.vehicle.get_location(),
+            destination
+        )
+
+        print(f"[UGV] Rerouted to new destination: "
+              f"({destination.x:.1f}, {destination.y:.1f}, {destination.z:.1f})")
+        return True
+
+    def draw_path_markers(self,
+                          color: carla.Color = None,
+                          enabled: bool = True) -> None:
+        """
+        Enable or disable continuous path marker drawing.
+
+        Markers use a short lifetime and are periodically redrawn in update().
+        When the path changes (e.g., reroute), old markers expire on their own
+        and new ones are drawn automatically.
+
         Args:
             color: Marker color (red by default)
-            lifetime: How long markers persist (seconds)
+            enabled: True to show markers, False to stop (existing markers fade out)
         """
+        self.show_path_markers = enabled
+        if enabled:
+            self.marker_color = color or carla.Color(r=255, g=0, b=0)
+            self._draw_markers()  # Draw immediately
+        else:
+            print("[UGV] Path markers disabled")
+
+    def _draw_markers(self) -> None:
+        """Draw markers for the current path waypoints."""
         if not self.path_waypoints:
-            print("[UGV] No path to draw")
             return
-        
-        color = color or carla.Color(r=255, g=0, b=0)
-        
+
+        color = self.marker_color or carla.Color(r=255, g=0, b=0)
+
         for wp, road_option in self.path_waypoints:
             self.world.debug.draw_string(
                 wp.transform.location,
                 'X',
                 color=color,
-                life_time=lifetime,
+                life_time=self.marker_lifetime,
                 persistent_lines=True
             )
+        self.last_marker_draw_time = time.time()
     
     def update(self) -> bool:
         """
@@ -303,7 +385,11 @@ class UGVSubsystem:
         if current_time - self.last_broadcast_time >= self.broadcast_interval:
             self._broadcast_position()
             self.last_broadcast_time = current_time
-        
+
+        # Redraw path markers before they expire
+        if self.show_path_markers and current_time - self.last_marker_draw_time >= self.marker_redraw_interval:
+            self._draw_markers()
+
         return True
     
     def _update_velocity(self, dt: float) -> None:
@@ -346,6 +432,10 @@ class UGVSubsystem:
             source='UGVSubsystem'
         )
     
+    def _on_camera_image(self, image: carla.Image) -> None:
+        """Callback when camera captures a new frame."""
+        self.latest_camera_image = image
+
     def _publish_status(self, message: str) -> None:
         """Publish status update to message broker."""
         status_data = create_status_message(
@@ -389,10 +479,15 @@ class UGVSubsystem:
     
     def cleanup(self) -> None:
         """
-        Clean up the vehicle actor.
-        
+        Clean up the vehicle actor and sensors.
+
         IMPORTANT: Always call this when done
         """
+        if self.camera:
+            self.camera.stop()
+            self.camera.destroy()
+            print("[UGV] Camera destroyed")
+
         if self.vehicle:
             # Disable autopilot first
             try:
@@ -412,64 +507,97 @@ class UGVSubsystem:
 class SpectatorController:
     """
     Helper class to manage the spectator camera.
-    
+
     This is separated from the UGV subsystem to allow flexibility
     in what the camera follows (UGV, UAV, or custom position).
+
+    Uses interpolation (lerping) to smooth camera movement, avoiding
+    jarring snaps when the followed actor turns.
     """
-    
+
     def __init__(self, world: carla.World, config: Dict = None):
         """
         Initialize spectator controller.
-        
+
         Args:
             world: CARLA world object
             config: UI configuration dictionary
         """
         self.world = world
         self.spectator = world.get_spectator()
-        
+
         # Default follow parameters
         from config import UI_CONFIG
         config = config or UI_CONFIG
         self.follow_distance = config.get('spectator_distance', 20.0)
         self.follow_height = config.get('spectator_height', 15.0)
         self.follow_pitch = config.get('spectator_pitch', -30.0)
-    
+
+        # Smoothing factor: 0.0 = no movement, 1.0 = instant snap
+        # Lower values = smoother/slower camera, higher = more responsive
+        self.smoothing = config.get('spectator_smoothing', 0.08)
+
+        # Track current smoothed camera state
+        self._current_x: Optional[float] = None
+        self._current_y: Optional[float] = None
+        self._current_z: Optional[float] = None
+        self._current_yaw: Optional[float] = None
+
+    @staticmethod
+    def _lerp_angle(current: float, target: float, t: float) -> float:
+        """
+        Interpolate between two angles using the shortest path.
+
+        Handles wrapping around 360 degrees so the camera always
+        takes the shortest rotation direction.
+        """
+        diff = (target - current + 180) % 360 - 180
+        return current + diff * t
+
     def follow_actor(self, actor: carla.Actor) -> None:
         """
-        Position spectator to follow an actor.
-        
+        Position spectator to smoothly follow an actor.
+
         Args:
             actor: The actor to follow
         """
         if actor is None:
             return
-        
+
         transform = actor.get_transform()
         forward = transform.get_forward_vector()
-        
-        # Calculate camera position behind and above the actor
-        offset = carla.Location(
-            x=-self.follow_distance * forward.x,
-            y=-self.follow_distance * forward.y,
-            z=self.follow_height
-        )
-        
+
+        # Calculate desired camera position behind and above the actor
+        target_x = transform.location.x - self.follow_distance * forward.x
+        target_y = transform.location.y - self.follow_distance * forward.y
+        target_z = transform.location.z + self.follow_height
+        target_yaw = transform.rotation.yaw
+
+        # Initialize on first call (snap to position immediately)
+        if self._current_x is None:
+            self._current_x = target_x
+            self._current_y = target_y
+            self._current_z = target_z
+            self._current_yaw = target_yaw
+        else:
+            # Smoothly interpolate position and rotation
+            t = self.smoothing
+            self._current_x += (target_x - self._current_x) * t
+            self._current_y += (target_y - self._current_y) * t
+            self._current_z += (target_z - self._current_z) * t
+            self._current_yaw = self._lerp_angle(self._current_yaw, target_yaw, t)
+
         spectator_transform = carla.Transform(
-            transform.location + offset,
-            carla.Rotation(
-                pitch=self.follow_pitch,
-                yaw=transform.rotation.yaw,
-                roll=0
-            )
+            carla.Location(x=self._current_x, y=self._current_y, z=self._current_z),
+            carla.Rotation(pitch=self.follow_pitch, yaw=self._current_yaw, roll=0)
         )
-        
+
         self.spectator.set_transform(spectator_transform)
-    
+
     def follow_position(self, x: float, y: float, z: float, yaw: float = 0) -> None:
         """
-        Position spectator to look at a specific position.
-        
+        Position spectator to smoothly look at a specific position.
+
         Args:
             x, y, z: Position to look at
             yaw: Direction the camera should face
@@ -477,20 +605,29 @@ class SpectatorController:
         yaw_rad = math.radians(yaw)
         forward_x = math.cos(yaw_rad)
         forward_y = math.sin(yaw_rad)
-        
+
+        target_x = x - self.follow_distance * forward_x
+        target_y = y - self.follow_distance * forward_y
+        target_z = z + self.follow_height
+
+        # Initialize on first call
+        if self._current_x is None:
+            self._current_x = target_x
+            self._current_y = target_y
+            self._current_z = target_z
+            self._current_yaw = yaw
+        else:
+            t = self.smoothing
+            self._current_x += (target_x - self._current_x) * t
+            self._current_y += (target_y - self._current_y) * t
+            self._current_z += (target_z - self._current_z) * t
+            self._current_yaw = self._lerp_angle(self._current_yaw, yaw, t)
+
         spectator_transform = carla.Transform(
-            carla.Location(
-                x=x - self.follow_distance * forward_x,
-                y=y - self.follow_distance * forward_y,
-                z=z + self.follow_height
-            ),
-            carla.Rotation(
-                pitch=self.follow_pitch,
-                yaw=yaw,
-                roll=0
-            )
+            carla.Location(x=self._current_x, y=self._current_y, z=self._current_z),
+            carla.Rotation(pitch=self.follow_pitch, yaw=self._current_yaw, roll=0)
         )
-        
+
         self.spectator.set_transform(spectator_transform)
     
     def set_follow_parameters(self, 
