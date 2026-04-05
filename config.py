@@ -21,12 +21,25 @@ UGV_CONFIG = {
     # Vehicle blueprint - can be changed to any vehicle in CARLA's catalog
     # See: https://carla.readthedocs.io/en/latest/catalogue_vehicles/
     'blueprint': 'vehicle.jeep.wrangler_rubicon',
-    
+
     # Navigation settings
     'ignore_traffic_lights': True,  # For demo purposes
     'ignore_stop_signs': True,      # For demo purposes
     'follow_speed_limits': False,   # For demo purposes
     'target_speed': 30.0,           # km/h when not following speed limits
+
+    # LIDAR sensor settings
+    'lidar_channels': 32,               # Number of vertical laser lines
+    'lidar_range': 50.0,                # Max detection range (meters)
+    'lidar_points_per_second': 300000,  # Total points generated per second
+    'lidar_rotation_frequency': 20.0,   # Full rotations per second (Hz)
+    'lidar_upper_fov': 10.0,            # Upper vertical FOV limit (degrees)
+    'lidar_lower_fov': -30.0,           # Lower vertical FOV limit (degrees)
+
+    # Obstacle detection settings
+    'obstacle_distance_threshold': 15.0,  # meters - obstacles closer than this are reported
+    'obstacle_min_points': 5,             # minimum point count to consider a cluster an obstacle
+    'obstacle_ground_threshold': 0.3,     # meters - points below this height are ground, not obstacles
 }
 
 # =============================================================================
@@ -72,9 +85,10 @@ COORDINATION_CONFIG = {
 # Topic names for the pub/sub system
 # naming convention: subsystem/data_type
 TOPICS = {
-    # UGV publishes its position and status
+    # UGV publishes its position, status, and detected obstacles
     'UGV_POSITION': 'ugv/position',
     'UGV_STATUS': 'ugv/status',
+    'UGV_OBSTACLES': 'ugv/obstacles',
     
     # UAV publishes its position and status
     'UAV_POSITION': 'uav/position',

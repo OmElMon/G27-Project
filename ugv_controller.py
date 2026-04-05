@@ -19,6 +19,7 @@ import time
 import math
 import sys
 import os
+import numpy as np
 from typing import Optional, Tuple, Dict, List, Any
 
 # Import CARLA agents (adjust path as needed for your setup)
@@ -81,7 +82,7 @@ class UGVSubsystem:
         
         # CARLA objects
         self.vehicle: Optional[carla.Vehicle] = None
-        self.camera: Optional[carla.Sensor] = None
+        self.lidar: Optional[carla.Sensor] = None
         self.agent: Optional['BasicAgent'] = None
         
         # State tracking
@@ -111,8 +112,11 @@ class UGVSubsystem:
         self.current_status = SystemState.IDLE
         self.destination_reached = False
 
-        # Camera image storage (most recent frame)
-        self.latest_camera_image = None
+        # LIDAR data storage
+        self.latest_point_cloud: Optional[np.ndarray] = None  # Nx4 array [x, y, z, intensity]
+        self.detected_obstacles: List[Dict] = []               # Processed obstacle list
+        self.last_obstacle_broadcast_time = 0.0
+        self.obstacle_broadcast_interval = 0.2  # Broadcast obstacles at 5Hz
 
         print("[UGV] Subsystem created")
     
@@ -163,25 +167,28 @@ class UGVSubsystem:
             self.last_position = (loc.x, loc.y, loc.z)
             self.last_position_time = time.time()
 
-            # === ATTACH CAMERA SENSOR ===
-            camera_bp = bp_lib.find('sensor.camera.rgb')
-            camera_bp.set_attribute('image_size_x', '640')
-            camera_bp.set_attribute('image_size_y', '480')
-            camera_bp.set_attribute('fov', '90')
+            # === ATTACH LIDAR SENSOR ===
+            lidar_bp = bp_lib.find('sensor.lidar.ray_cast')
+            lidar_bp.set_attribute('channels', str(int(self.config.get('lidar_channels', 32))))
+            lidar_bp.set_attribute('range', str(self.config.get('lidar_range', 50.0)))
+            lidar_bp.set_attribute('points_per_second', str(int(self.config.get('lidar_points_per_second', 300000))))
+            lidar_bp.set_attribute('rotation_frequency', str(self.config.get('lidar_rotation_frequency', 20.0)))
+            lidar_bp.set_attribute('upper_fov', str(self.config.get('lidar_upper_fov', 10.0)))
+            lidar_bp.set_attribute('lower_fov', str(self.config.get('lidar_lower_fov', -30.0)))
 
-            # Camera transform relative to vehicle (forward-facing, mounted on roof)
-            camera_transform = carla.Transform(
-                carla.Location(x=1.5, y=0, z=2.0),  # Front of vehicle, roof height
-                carla.Rotation(pitch=-10, yaw=0, roll=0)  # Slightly angled down
+            # Mount on vehicle roof, centered
+            lidar_transform = carla.Transform(
+                carla.Location(x=0.0, y=0, z=2.4),
+                carla.Rotation(pitch=0, yaw=0, roll=0)
             )
 
-            self.camera = self.world.spawn_actor(
-                camera_bp,
-                camera_transform,
+            self.lidar = self.world.spawn_actor(
+                lidar_bp,
+                lidar_transform,
                 attach_to=self.vehicle
             )
-            self.camera.listen(self._on_camera_image)
-            print("[UGV] Camera sensor attached")
+            self.lidar.listen(self._on_lidar_data)
+            print("[UGV] LIDAR sensor attached")
 
             self.is_initialized = True
             self.current_status = SystemState.TRACKING
@@ -386,6 +393,12 @@ class UGVSubsystem:
             self._broadcast_position()
             self.last_broadcast_time = current_time
 
+        # Process LIDAR data and broadcast obstacles at throttled rate
+        if current_time - self.last_obstacle_broadcast_time >= self.obstacle_broadcast_interval:
+            self._process_obstacles()
+            self._broadcast_obstacles()
+            self.last_obstacle_broadcast_time = current_time
+
         # Redraw path markers before they expire
         if self.show_path_markers and current_time - self.last_marker_draw_time >= self.marker_redraw_interval:
             self._draw_markers()
@@ -432,9 +445,103 @@ class UGVSubsystem:
             source='UGVSubsystem'
         )
     
-    def _on_camera_image(self, image: carla.Image) -> None:
-        """Callback when camera captures a new frame."""
-        self.latest_camera_image = image
+    def _on_lidar_data(self, measurement) -> None:
+        """
+        Callback when LIDAR completes a sweep. Runs on CARLA's sensor thread.
+
+        Args:
+            measurement: carla.LidarMeasurement containing the point cloud
+        """
+        # raw_data is a flat buffer of floats: [x, y, z, intensity, x, y, z, intensity, ...]
+        # Each point is 4 floats × 4 bytes = 16 bytes
+        points = np.frombuffer(measurement.raw_data, dtype=np.float32).reshape(-1, 4)
+        self.latest_point_cloud = points
+
+    def _process_obstacles(self) -> None:
+        """
+        Process the latest LIDAR point cloud to detect nearby obstacles.
+
+        Steps:
+        1. Filter out ground points (below ground_threshold relative to sensor)
+        2. Filter to points within the obstacle detection range
+        3. Cluster nearby points into distinct obstacles
+        4. Publish obstacle data to the message broker
+        """
+        if self.latest_point_cloud is None or len(self.latest_point_cloud) == 0:
+            return
+
+        points = self.latest_point_cloud  # Nx4: [x, y, z, intensity]
+
+        # Ground filtering
+        # Points are in sensor-local coordinates. The LIDAR is mounted at z=2.4m
+        # above the vehicle base, so ground-level points have z ≈ -2.1 (below sensor).
+        # We keep only points above (ground_threshold - sensor_height) in sensor space.
+        sensor_height = 2.4  # matches lidar_transform z in initialize()
+        ground_z = -sensor_height + self.config.get('obstacle_ground_threshold', 0.3)
+        above_ground = points[:, 2] > ground_z
+        filtered = points[above_ground]
+
+        if len(filtered) == 0:
+            self.detected_obstacles = []
+            return
+
+        # Distance filtering
+        # Compute horizontal distance from sensor to each point
+        distances = np.sqrt(filtered[:, 0]**2 + filtered[:, 1]**2)
+        threshold = self.config.get('obstacle_distance_threshold', 15.0)
+        nearby_mask = distances < threshold
+        nearby_points = filtered[nearby_mask]
+        nearby_distances = distances[nearby_mask]
+
+        if len(nearby_points) == 0:
+            self.detected_obstacles = []
+            return
+
+        # Simple angular binning for obstacle clustering
+        # Divide the 360° around the vehicle into bins and group points by angle.
+        # Each non-empty bin with enough points represents one obstacle.
+        angles = np.degrees(np.arctan2(nearby_points[:, 1], nearby_points[:, 0]))
+        bin_size = 10  # degrees per bin
+        bins = ((angles + 180) / bin_size).astype(int) % (360 // bin_size)
+
+        min_points = self.config.get('obstacle_min_points', 5)
+        obstacles = []
+
+        for bin_id in np.unique(bins):
+            mask = bins == bin_id
+            if np.sum(mask) < min_points:
+                continue
+
+            cluster_points = nearby_points[mask]
+            cluster_distances = nearby_distances[mask]
+
+            # Obstacle represented by its closest point and centroid
+            closest_idx = np.argmin(cluster_distances)
+            centroid_x = float(np.mean(cluster_points[:, 0]))
+            centroid_y = float(np.mean(cluster_points[:, 1]))
+            centroid_z = float(np.mean(cluster_points[:, 2]))
+
+            obstacles.append({
+                'centroid': {'x': centroid_x, 'y': centroid_y, 'z': centroid_z},
+                'distance': float(cluster_distances[closest_idx]),
+                'angle': float(np.mean(angles[mask])),
+                'point_count': int(np.sum(mask)),
+            })
+
+        self.detected_obstacles = obstacles
+
+    def _broadcast_obstacles(self) -> None:
+        """Publish detected obstacles to the message broker."""
+        obstacle_data = {
+            'obstacles': self.detected_obstacles,
+            'count': len(self.detected_obstacles),
+            'timestamp': time.time(),
+        }
+        self.broker.publish(
+            TOPICS['UGV_OBSTACLES'],
+            obstacle_data,
+            source='UGVSubsystem'
+        )
 
     def _publish_status(self, message: str) -> None:
         """Publish status update to message broker."""
@@ -483,10 +590,10 @@ class UGVSubsystem:
 
         IMPORTANT: Always call this when done
         """
-        if self.camera:
-            self.camera.stop()
-            self.camera.destroy()
-            print("[UGV] Camera destroyed")
+        if self.lidar:
+            self.lidar.stop()
+            self.lidar.destroy()
+            print("[UGV] LIDAR destroyed")
 
         if self.vehicle:
             # Disable autopilot first
