@@ -375,6 +375,10 @@ class UGVSubsystem:
         # Update velocity calculation
         self._update_velocity(dt)
         
+        # Process LIDAR obstacles every tick so avoidance reacts quickly.
+        # Broadcasting to the message broker stays throttled below.
+        self._process_obstacles()
+
         # Handle navigation based on mode
         if self.navigation_mode == NavigationMode.SCRIPTED and self.agent:
             # Check if destination reached
@@ -383,19 +387,21 @@ class UGVSubsystem:
                 print("[UGV] Reached final destination!")
                 self._publish_status("Destination reached")
                 return False
-            
-            # Get and apply control from agent
+
+            # Planner produces nominal control; local avoider may override it
+            # when LIDAR sees something in the forward collision cone.
             control = self.agent.run_step()
+            if self.config.get('avoidance_enabled', True):
+                control = self._adjust_control_for_obstacles(control)
             self.vehicle.apply_control(control)
-        
+
         # Broadcast position at configured interval
         if current_time - self.last_broadcast_time >= self.broadcast_interval:
             self._broadcast_position()
             self.last_broadcast_time = current_time
 
-        # Process LIDAR data and broadcast obstacles at throttled rate
+        # Broadcast obstacles at throttled rate (processing already happened above)
         if current_time - self.last_obstacle_broadcast_time >= self.obstacle_broadcast_interval:
-            self._process_obstacles()
             self._broadcast_obstacles()
             self.last_obstacle_broadcast_time = current_time
 
@@ -529,6 +535,54 @@ class UGVSubsystem:
             })
 
         self.detected_obstacles = obstacles
+
+    def _adjust_control_for_obstacles(self, control: 'carla.VehicleControl') -> 'carla.VehicleControl':
+        """
+        Modify planner control to avoid obstacles in the forward collision cone.
+
+        Two-tier response:
+        - Emergency brake if any obstacle is closer than `avoidance_emergency_distance`.
+        - Steer away (proportional to urgency) if the closest is within
+          `avoidance_warning_distance`. Steering offset is added on top of the
+          planner's steer so the UGV still tracks the global path when clear.
+
+        Obstacle `angle` is in sensor-local frame: 0° = forward, +angle = right
+        (CARLA uses +x forward, +y right). So an obstacle on the right (+angle)
+        makes us steer left (negative steer) and vice versa.
+        """
+        if not self.detected_obstacles:
+            return control
+
+        cone_half = self.config.get('avoidance_cone_half_angle', 25.0)
+        emergency_d = self.config.get('avoidance_emergency_distance', 5.0)
+        warning_d = self.config.get('avoidance_warning_distance', 10.0)
+        max_offset = self.config.get('avoidance_max_steer_offset', 0.5)
+
+        closest = None
+        for obs in self.detected_obstacles:
+            if abs(obs['angle']) <= cone_half:
+                if closest is None or obs['distance'] < closest['distance']:
+                    closest = obs
+
+        if closest is None:
+            return control
+
+        dist = closest['distance']
+
+        if dist < emergency_d:
+            control.throttle = 0.0
+            control.brake = 1.0
+            return control
+
+        if dist < warning_d:
+            # Urgency ramps 0 -> 1 as distance shrinks from warning to emergency
+            urgency = (warning_d - dist) / max(warning_d - emergency_d, 1e-6)
+            steer_sign = -1.0 if closest['angle'] >= 0 else 1.0
+            control.steer = max(-1.0, min(1.0,
+                control.steer + steer_sign * urgency * max_offset))
+            control.throttle *= (1.0 - 0.5 * urgency)
+
+        return control
 
     def _broadcast_obstacles(self) -> None:
         """Publish detected obstacles to the message broker."""

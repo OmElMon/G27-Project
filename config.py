@@ -40,6 +40,13 @@ UGV_CONFIG = {
     'obstacle_distance_threshold': 15.0,  # meters - obstacles closer than this are reported
     'obstacle_min_points': 5,             # minimum point count to consider a cluster an obstacle
     'obstacle_ground_threshold': 0.3,     # meters - points below this height are ground, not obstacles
+
+    # Obstacle avoidance settings (only active in scripted navigation mode)
+    'avoidance_enabled': True,            # master toggle for reactive avoidance
+    'avoidance_cone_half_angle': 25.0,    # degrees - ±this from forward defines the collision cone
+    'avoidance_emergency_distance': 5.0,  # meters - full brake if obstacle closer than this
+    'avoidance_warning_distance': 10.0,   # meters - start steering away at this distance
+    'avoidance_max_steer_offset': 0.5,    # max steering override added on top of planner's steer (-1..1)
 }
 
 # =============================================================================
