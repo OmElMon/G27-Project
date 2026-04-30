@@ -28,10 +28,14 @@ G27-Project/
 │── reference/                # Semester 1 demo/reference code
 │── .gitignore
 │
-│── carla_sync_UGV_UAV.py     # Main simulation runner
+│── carla_sync_UGV_UAV.py     
 │── config.py                 # Simulation configuration and parameters
+│── coordination_platform.py  # Implements leader-follower logic
 │── data_logger.py            # Logs simulation and sensor data
 │── ed2_avoid.py              # Obstacle avoidance implementation
+│── gui_console.py            # Implements the GUI
+│── gui_main.py               # Main simulation runner, displays GUI
+│── main.py                   # Headless simulation runner, no GUI, uses Carla display
 │── message_broker.py         # Communication between UAV and UGV
 │── sensor_manager.py         # Sensor setup and handling
 │── uav_controller.py         # UAV movement and logic
@@ -49,18 +53,119 @@ G27-Project/
 
 ## How to Run
 
-### 1. Start CARLA Server
+## Prerequisites
 
-```bash
-CarlaUE4.exe
+- Windows 10 or 11
+- [CARLA 0.9.16](https://github.com/carla-simulator/carla/releases) installed and extracted
+- Python 3.12 (install from [python.org](https://www.python.org/downloads/)
+
+## Setup
+
+Open a terminal in the project root (the folder containing this README) and run
+the steps below.
+
+### 1. Create and activate a virtual environment
+
+```powershell
+py -3.12 -m venv venv
 ```
 
-### 2. Run Simulation
+Activate it. The activation command depends on your shell:
 
-```bash
-python carla_sync_UGV_UAV.py
+- **PowerShell**:
+  ```powershell
+  .\venv\Scripts\Activate.ps1
+  ```
+  If PowerShell blocks the script with an execution policy error, run this once
+  in an elevated PowerShell:
+  ```powershell
+  Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+  ```
+
+- **cmd.exe**:
+  ```cmd
+  venv\Scripts\activate.bat
+  ```
+
+- **Git Bash**:
+  ```bash
+  source venv/Scripts/activate
+  ```
+
+### 2. Install the CARLA Python API wheel
+
+The `carla==0.9.16` line in `requirements.txt` will pull from PyPI on most
+machines, but if that fails (Windows wheels for some CARLA versions are not
+published), install the wheel shipped with your CARLA installation directly:
+
+```powershell
+pip install "C:\path\to\CARLA_0.9.16\PythonAPI\carla\dist\carla-0.9.16-cp312-cp312-win_amd64.whl"
 ```
 
+Replace the path with wherever you extracted CARLA. 
+
+### 3. Install the remaining dependencies
+
+```powershell
+pip install -r requirements.txt
+```
+
+## Running the Project
+
+### 1. Start the CARLA server
+
+In a separate terminal, launch the simulator:
+
+```powershell
+cd C:\path\to\CARLA_0.9.16
+.\CarlaUE4.exe
+```
+
+Wait until the CARLA window finishes loading the default map.
+
+### 2. Run the simulation
+
+Two entry points are available. Both will prompt interactively for navigation
+mode, follow distance, follow altitude, and camera target.
+
+**GUI console (recommended)** — full operator console with chase camera, UAV
+picture-in-picture, live state readout, and a clickable minimap that lets you
+re-route the UGV at runtime:
+
+```powershell
+python main_gui.py
+```
+
+**Headless / terminal mode** — simpler runner with a small UAV camera popup:
+
+```powershell
+python main.py
+```
+
+Both accept optional CLI flags:
+
+```powershell
+python main_gui.py --host localhost --port 2000 --distance 25 --altitude 30
+```
+
+### 3. Stop the simulation
+
+- Click the **Quit** button in the GUI console, or close the window
+- Press `Ctrl+C` in the terminal
+- Or wait for the UGV to reach its destination
+
+CSV logs are written to `./logs/` after each run.
+
+## Running Individual Subsystems
+
+Each subsystem can be run standalone for testing. Make sure the CARLA server
+is running first.
+
+```powershell
+python ugv_controller.py        # UGV-only test (autopilot or scripted path)
+python uav_controller.py        # UAV-only test
+python coordination_platform.py # Coordination logic with simulated messages
+```
 ---
 
 ## Current Progress

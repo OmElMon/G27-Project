@@ -1,0 +1,14 @@
+# Requires Python 3.12
+
+# CARLA Python API. On Windows, if pip install fails, install the .egg from
+# CarlaSimulator/PythonAPI/carla/dist/ instead (must match your CARLA version).
+carla==0.9.16
+
+future
+numpy<2.0.0
+networkx
+Shapely
+pygame
+matplotlib
+open3d
+Pillow
