@@ -28,25 +28,22 @@ UGV_CONFIG = {
     'follow_speed_limits': False,   # For demo purposes
     'target_speed': 30.0,           # km/h when not following speed limits
 
-    # LIDAR sensor settings
+    # LIDAR sensor settings (used for obstacle detection + GUI minimap dots)
     'lidar_channels': 32,               # Number of vertical laser lines
     'lidar_range': 50.0,                # Max detection range (meters)
     'lidar_points_per_second': 300000,  # Total points generated per second
     'lidar_rotation_frequency': 20.0,   # Full rotations per second (Hz)
     'lidar_upper_fov': 10.0,            # Upper vertical FOV limit (degrees)
     'lidar_lower_fov': -30.0,           # Lower vertical FOV limit (degrees)
+    'lidar_mount_x': 1.0,               # meters forward from vehicle origin
+    'lidar_mount_z': 1.4,               # meters above vehicle origin
 
-    # Obstacle detection settings
-    'obstacle_distance_threshold': 15.0,  # meters - obstacles closer than this are reported
-    'obstacle_min_points': 5,             # minimum point count to consider a cluster an obstacle
-    'obstacle_ground_threshold': 0.3,     # meters - points below this height are ground, not obstacles
-
-    # Obstacle avoidance settings (only active in scripted navigation mode)
-    'avoidance_enabled': True,            # master toggle for reactive avoidance
-    'avoidance_cone_half_angle': 25.0,    # degrees - ±this from forward defines the collision cone
-    'avoidance_emergency_distance': 5.0,  # meters - full brake if obstacle closer than this
-    'avoidance_warning_distance': 10.0,   # meters - start steering away at this distance
-    'avoidance_max_steer_offset': 0.5,    # max steering override added on top of planner's steer (-1..1)
+    # Obstacle detection settings (output is published to UGV_OBSTACLES topic
+    # for the data logger and GUI minimap; no on-board avoidance acts on it)
+    'obstacle_distance_threshold': 25.0,  # meters
+    'obstacle_min_points': 3,             # minimum point count to consider a cluster an obstacle
+    'obstacle_min_distance': 2.0,         # meters
+    'obstacle_ground_threshold': 0.3,     # meters
 }
 
 # =============================================================================
@@ -69,7 +66,7 @@ UAV_CONFIG = {
     'default_follow_distance': 25.0,
     
     # Control loop settings
-    'position_tolerance': 2.0,      # meters - considered "at target" if within this distance
+    'position_tolerance': 2.0,      # meters, considered "at target" if within this distance
     'update_rate': 0.05,            # seconds between control updates (20 Hz)
 }
 
@@ -78,8 +75,8 @@ UAV_CONFIG = {
 # =============================================================================
 COORDINATION_CONFIG = {
     # Communication timeout settings
-    'position_timeout': 3.0,        # seconds - triggers "target lost" state
-    'search_timeout': 60.0,         # seconds - max time in search mode before giving up
+    'position_timeout': 3.0,        # seconds, triggers "target lost" state
+    'search_timeout': 60.0,         # seconds, max time in search mode before giving up
     
     # Waypoint generation settings
     'waypoint_lookahead': 2.0,      # seconds - predict where UGV will be
@@ -96,14 +93,14 @@ TOPICS = {
     'UGV_POSITION': 'ugv/position',
     'UGV_STATUS': 'ugv/status',
     'UGV_OBSTACLES': 'ugv/obstacles',
-    
+
     # UAV publishes its position and status
     'UAV_POSITION': 'uav/position',
     'UAV_STATUS': 'uav/status',
-    
+
     # Coordination platform publishes waypoints for UAV
     'UAV_WAYPOINT': 'coordination/uav_waypoint',
-    
+
     # System control messages
     'SYSTEM_COMMAND': 'system/command',
     'SYSTEM_STATUS': 'system/status',

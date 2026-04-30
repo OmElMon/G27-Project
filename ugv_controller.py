@@ -104,7 +104,7 @@ class UGVSubsystem:
         # Path marker visualization
         self.show_path_markers = False
         self.marker_color: Optional[carla.Color] = None
-        self.marker_lifetime = 2.0  # seconds — short so stale markers expire quickly
+        self.marker_lifetime = 2.0 # seconds
         self.last_marker_draw_time = 0.0
         self.marker_redraw_interval = 1.0  # redraw before markers expire
         
@@ -112,11 +112,11 @@ class UGVSubsystem:
         self.current_status = SystemState.IDLE
         self.destination_reached = False
 
-        # LIDAR data storage
-        self.latest_point_cloud: Optional[np.ndarray] = None  # Nx4 array [x, y, z, intensity]
+        # LIDAR data storage (used for obstacle detection + GUI minimap)
+        self.latest_point_cloud: Optional[np.ndarray] = None   # Nx4 array [x, y, z, intensity]
         self.detected_obstacles: List[Dict] = []               # Processed obstacle list
         self.last_obstacle_broadcast_time = 0.0
-        self.obstacle_broadcast_interval = 0.2  # Broadcast obstacles at 5Hz
+        self.obstacle_broadcast_interval = 0.2                 # Broadcast obstacles at 5Hz
 
         print("[UGV] Subsystem created")
     
@@ -176,9 +176,12 @@ class UGVSubsystem:
             lidar_bp.set_attribute('upper_fov', str(self.config.get('lidar_upper_fov', 10.0)))
             lidar_bp.set_attribute('lower_fov', str(self.config.get('lidar_lower_fov', -30.0)))
 
-            # Mount on vehicle roof, centered
+            lidar_x = float(self.config.get('lidar_mount_x', 1.0))
+            lidar_z = float(self.config.get('lidar_mount_z', 1.4))
+            self._lidar_mount_height = lidar_z
+
             lidar_transform = carla.Transform(
-                carla.Location(x=0.0, y=0, z=2.4),
+                carla.Location(x=lidar_x, y=0, z=lidar_z),
                 carla.Rotation(pitch=0, yaw=0, roll=0)
             )
 
@@ -252,6 +255,8 @@ class UGVSubsystem:
             
             # Initialize BasicAgent
             self.agent = BasicAgent(self.vehicle)
+            if hasattr(self.agent, 'set_target_speed'):
+                self.agent.set_target_speed(target_speed)
             
             # Configure agent
             self.agent.ignore_traffic_lights(
@@ -303,7 +308,23 @@ class UGVSubsystem:
             print("[UGV] Cannot set destination - not in scripted mode")
             return False
 
-        self.final_destination = destination
+        return self._route_to(destination, update_final_destination=True)
+
+    def _route_to(self,
+                  destination: carla.Location,
+                  update_final_destination: bool = False) -> bool:
+        """
+        Route the BasicAgent to a destination.
+
+        Detours use this without replacing final_destination. User/requested
+        reroutes use update_final_destination=True.
+        """
+        if not self.is_initialized or self.vehicle is None or self.agent is None:
+            return False
+
+        if update_final_destination:
+            self.final_destination = destination
+
         self.destination_reached = False
 
         # BasicAgent.set_destination replaces the current route
@@ -316,7 +337,8 @@ class UGVSubsystem:
             destination
         )
 
-        print(f"[UGV] Rerouted to new destination: "
+        label = "destination" if update_final_destination else "temporary target"
+        print(f"[UGV] Rerouted to {label}: "
               f"({destination.x:.1f}, {destination.y:.1f}, {destination.z:.1f})")
         return True
 
@@ -374,25 +396,20 @@ class UGVSubsystem:
         
         # Update velocity calculation
         self._update_velocity(dt)
-        
-        # Process LIDAR obstacles every tick so avoidance reacts quickly.
-        # Broadcasting to the message broker stays throttled below.
+
+        # Process LIDAR point cloud into obstacle clusters for downstream
+        # subscribers (data logger, GUI minimap).
         self._process_obstacles()
 
         # Handle navigation based on mode
         if self.navigation_mode == NavigationMode.SCRIPTED and self.agent:
-            # Check if destination reached
             if self.agent.done():
                 self.destination_reached = True
                 print("[UGV] Reached final destination!")
                 self._publish_status("Destination reached")
                 return False
 
-            # Planner produces nominal control; local avoider may override it
-            # when LIDAR sees something in the forward collision cone.
             control = self.agent.run_step()
-            if self.config.get('avoidance_enabled', True):
-                control = self._adjust_control_for_obstacles(control)
             self.vehicle.apply_control(control)
 
         # Broadcast position at configured interval
@@ -482,7 +499,10 @@ class UGVSubsystem:
         # Points are in sensor-local coordinates. The LIDAR is mounted at z=2.4m
         # above the vehicle base, so ground-level points have z ≈ -2.1 (below sensor).
         # We keep only points above (ground_threshold - sensor_height) in sensor space.
-        sensor_height = 2.4  # matches lidar_transform z in initialize()
+        sensor_height = getattr(
+            self, '_lidar_mount_height',
+            float(self.config.get('lidar_mount_z', 1.4))
+        )
         ground_z = -sensor_height + self.config.get('obstacle_ground_threshold', 0.3)
         above_ground = points[:, 2] > ground_z
         filtered = points[above_ground]
@@ -495,7 +515,12 @@ class UGVSubsystem:
         # Compute horizontal distance from sensor to each point
         distances = np.sqrt(filtered[:, 0]**2 + filtered[:, 1]**2)
         threshold = self.config.get('obstacle_distance_threshold', 15.0)
-        nearby_mask = distances < threshold
+        # Inner cutoff: discard points too close to the LIDAR, these come
+        # from the UGV's own body (mirrors, hood, roof rack). Without this,
+        # the obstacle list is constantly polluted with a phantom obstacle
+        # at ~1 m, especially with low min_points settings.
+        min_distance = self.config.get('obstacle_min_distance', 2.0)
+        nearby_mask = (distances < threshold) & (distances > min_distance)
         nearby_points = filtered[nearby_mask]
         nearby_distances = distances[nearby_mask]
 
@@ -535,54 +560,6 @@ class UGVSubsystem:
             })
 
         self.detected_obstacles = obstacles
-
-    def _adjust_control_for_obstacles(self, control: 'carla.VehicleControl') -> 'carla.VehicleControl':
-        """
-        Modify planner control to avoid obstacles in the forward collision cone.
-
-        Two-tier response:
-        - Emergency brake if any obstacle is closer than `avoidance_emergency_distance`.
-        - Steer away (proportional to urgency) if the closest is within
-          `avoidance_warning_distance`. Steering offset is added on top of the
-          planner's steer so the UGV still tracks the global path when clear.
-
-        Obstacle `angle` is in sensor-local frame: 0° = forward, +angle = right
-        (CARLA uses +x forward, +y right). So an obstacle on the right (+angle)
-        makes us steer left (negative steer) and vice versa.
-        """
-        if not self.detected_obstacles:
-            return control
-
-        cone_half = self.config.get('avoidance_cone_half_angle', 25.0)
-        emergency_d = self.config.get('avoidance_emergency_distance', 5.0)
-        warning_d = self.config.get('avoidance_warning_distance', 10.0)
-        max_offset = self.config.get('avoidance_max_steer_offset', 0.5)
-
-        closest = None
-        for obs in self.detected_obstacles:
-            if abs(obs['angle']) <= cone_half:
-                if closest is None or obs['distance'] < closest['distance']:
-                    closest = obs
-
-        if closest is None:
-            return control
-
-        dist = closest['distance']
-
-        if dist < emergency_d:
-            control.throttle = 0.0
-            control.brake = 1.0
-            return control
-
-        if dist < warning_d:
-            # Urgency ramps 0 -> 1 as distance shrinks from warning to emergency
-            urgency = (warning_d - dist) / max(warning_d - emergency_d, 1e-6)
-            steer_sign = -1.0 if closest['angle'] >= 0 else 1.0
-            control.steer = max(-1.0, min(1.0,
-                control.steer + steer_sign * urgency * max_offset))
-            control.throttle *= (1.0 - 0.5 * urgency)
-
-        return control
 
     def _broadcast_obstacles(self) -> None:
         """Publish detected obstacles to the message broker."""
@@ -805,7 +782,7 @@ class SpectatorController:
 
 
 # =============================================================================
-# STANDALONE TEST (similar to original Initial_UGV.py)
+# STANDALONE TEST
 # =============================================================================
 if __name__ == '__main__':
     """
