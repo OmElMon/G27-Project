@@ -1,201 +1,87 @@
-# UAV–UGV Coordination System (CARLA)
+# UAV–UGV Coordination in CARLA
 
-## Project Overview
-This project focuses on building a simulation system for coordination between UAVs (Unmanned Aerial Vehicles) and UGVs (Unmanned Ground Vehicles) using the **CARLA simulator**.
+A collaborative Florida Atlantic University senior-design project exploring how an aerial follower can track a ground vehicle inside CARLA. Modular controllers exchange position and waypoint messages, while a coordination state machine handles tracking, stale telemetry, search, and mission completion.
 
-The system enables autonomous navigation, obstacle avoidance, sensor integration, and communication between agents in a controlled virtual environment.
+## Implemented capabilities
 
-## Objectives
-- Simulate UAV and UGV coordination in CARLA
-- Implement obstacle avoidance using LiDAR sensors
-- Enable communication via a message broker system
-- Collect and log simulation data for analysis
-- Provide a modular architecture for team development
+- Ground vehicle navigation through CARLA autopilot or scripted routes using `BasicAgent` when CARLA's agent modules are available.
+- A kinematic aerial follower with speed, acceleration, vertical-motion, and yaw-rate limits, plus an attached RGB camera.
+- Follow waypoints calculated from ground-vehicle heading, distance, altitude, lateral offset, and velocity lookahead.
+- Target-loss detection based on stale ground-vehicle position messages, with hover and spiral search behavior.
+- LiDAR processing and obstacle telemetry, an operator GUI, and timestamped CSV logging of positions, obstacles, and state changes.
 
-## Key Features
-- UGV and UAV control systems
-- Sensor integration: LiDAR, camera, etc.
-- Obstacle avoidance logic
-- Message broker for inter-agent communication
-- Data logging system
-- Configurable simulation parameters
+## Architecture
 
-
-## Project Structure
-
-```text
-G27-Project/
-│── reference/                # Semester 1 demo/reference code
-│── .gitignore
-│
-│── carla_sync_UGV_UAV.py     
-│── config.py                 # Simulation configuration and parameters
-│── coordination_platform.py  # Implements leader-follower logic
-│── data_logger.py            # Logs simulation and sensor data
-│── ed2_avoid.py              # Obstacle avoidance implementation
-│── gui_console.py            # Implements the GUI
-│── gui_main.py               # Main simulation runner, displays GUI
-│── main.py                   # Headless simulation runner, no GUI, uses Carla display
-│── message_broker.py         # Communication between UAV and UGV
-│── sensor_manager.py         # Sensor setup and handling
-│── uav_controller.py         # UAV movement and logic
-│── ugv_controller.py         # UGV movement and obstacle avoidance
+```mermaid
+flowchart LR
+  CARLA[CARLA world] --> UGV[UGV controller]
+  UGV -->|position and obstacles| Broker[In-process message broker]
+  Broker --> Coord[Coordination state machine]
+  Coord -->|follow waypoints| Broker
+  Broker --> UAV[Kinematic UAV controller]
+  UAV -->|position| Broker
+  Broker --> Logger[CSV data logger]
+  Broker --> GUI[Operator console]
+  UAV --> CARLA
 ```
 
-## Technologies Used
-- Python
-- CARLA Simulator
-- CARLA Python API
-- LiDAR Sensors
-- Git and GitHub
+The aerial vehicle is a CARLA actor or sensor platform moved by a kinematic model, since CARLA does not provide native UAV flight dynamics. Tracking uses vehicle telemetry; the RGB feed does not establish computer-vision target tracking.
 
----
+## Run on the documented Windows setup
 
-## How to Run
-
-## Prerequisites
-
-- Windows 10 or 11
-- [CARLA 0.9.16](https://github.com/carla-simulator/carla/releases) installed and extracted
-- Python 3.12 (install from [python.org](https://www.python.org/downloads/)
-
-## Setup
-
-Open a terminal in the project root (the folder containing this README) and run
-the steps below.
-
-### 1. Create and activate a virtual environment
+Prerequisites: Windows 10/11, Python 3.12, a CARLA 0.9.16 server, and its matching Python API. Availability of the CARLA package depends on platform and Python version.
 
 ```powershell
-py -3.12 -m venv venv
-```
-
-Activate it. The activation command depends on your shell:
-
-- **PowerShell**:
-  ```powershell
-  .\venv\Scripts\Activate.ps1
-  ```
-  If PowerShell blocks the script with an execution policy error, run this once
-  in an elevated PowerShell:
-  ```powershell
-  Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
-  ```
-
-- **cmd.exe**:
-  ```cmd
-  venv\Scripts\activate.bat
-  ```
-
-- **Git Bash**:
-  ```bash
-  source venv/Scripts/activate
-  ```
-
-### 2. Install the CARLA Python API wheel
-
-The `carla==0.9.16` line in `requirements.txt` will pull from PyPI on most
-machines, but if that fails (Windows wheels for some CARLA versions are not
-published), install the wheel shipped with your CARLA installation directly:
-
-```powershell
-pip install "C:\path\to\CARLA_0.9.16\PythonAPI\carla\dist\carla-0.9.16-cp312-cp312-win_amd64.whl"
-```
-
-Replace the path with wherever you extracted CARLA. 
-
-### 3. Install the remaining dependencies
-
-```powershell
+git clone https://github.com/OmElMon/G27-Project.git
+cd G27-Project
+py -3.12 -m venv .venv
+.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 ```
 
-## Running the Project
+If the pinned CARLA package cannot be installed, use the compatible API distribution from your CARLA installation. For scripted routes, make `CARLA/PythonAPI/carla` available on `PYTHONPATH` so `agents.navigation` imports successfully. The code also checks a project-local `Carla/PythonAPI/carla` directory.
 
-### 1. Start the CARLA server
-
-In a separate terminal, launch the simulator:
-
-```powershell
-cd C:\path\to\CARLA_0.9.16
-.\CarlaUE4.exe
-```
-
-Wait until the CARLA window finishes loading the default map.
-
-### 2. Run the simulation
-
-Two entry points are available. Both will prompt interactively for navigation
-mode, follow distance, follow altitude, and camera target.
-
-**GUI console (recommended)** — full operator console with chase camera, UAV
-picture-in-picture, live state readout, and a clickable minimap that lets you
-re-route the UGV at runtime:
+Launch the CARLA server separately, wait for its map to load, then run:
 
 ```powershell
 python main_gui.py
-```
-
-**Headless / terminal mode** — simpler runner with a small UAV camera popup:
-
-```powershell
+# Or use the terminal runner:
 python main.py
 ```
 
-Both accept optional CLI flags:
+The runners prompt for navigation mode, follow distance, altitude, and camera target. Stop with the GUI Quit button or `Ctrl+C`. Logging uses a timestamped directory under the configured log directory, defaulting to `logs/`.
 
-```powershell
-python main_gui.py --host localhost --port 2000 --distance 25 --altitude 30
-```
+## Source guide
 
-### 3. Stop the simulation
+| File | Role |
+| --- | --- |
+| `main.py`, `main_gui.py` | Simulation orchestration and lifecycle |
+| `ugv_controller.py` | Ground navigation and telemetry |
+| `uav_controller.py` | Aerial follower and kinematic movement |
+| `coordination_platform.py` | Follow geometry and state transitions |
+| `message_broker.py` | Publish/subscribe communication |
+| `gui_console.py` | Operator interface |
+| `data_logger.py` | CSV recording and separation metrics |
+| `config.py` | Runtime parameters and topics |
+| `ed2_avoid.py`, `sensor_manager.py` | Additional obstacle/sensor code |
+| `reference/` | Earlier reference implementation |
 
-- Click the **Quit** button in the GUI console, or close the window
-- Press `Ctrl+C` in the terminal
-- Or wait for the UGV to reach its destination
+## Validation and limits
 
-CSV logs are written to `./logs/` after each run.
+Subsystem entry points include `python coordination_platform.py` for simulated-message coordination exercises and CARLA-dependent `python ugv_controller.py` / `python uav_controller.py`. These are manual exercises, not an automated assertion-based test suite. The repository has no GitHub Actions runs at the time of this audit. A CARLA simulation was not executed for this documentation update.
 
-## Running Individual Subsystems
+The terminal runner parses `--host` and `--port`, but its connection method currently uses configuration constants rather than those parsed values; configure the connection in `config.py` until that wiring is fixed. Reproducible scenario tests, quantitative following-error plots, and improved sensor fusion are useful next steps.
 
-Each subsystem can be run standalone for testing. Make sure the CARLA server
-is running first.
+## Team and attribution
 
-```powershell
-python ugv_controller.py        # UGV-only test (autopilot or scripted path)
-python uav_controller.py        # UAV-only test
-python coordination_platform.py # Coordination logic with simulated messages
-```
----
+This is a team project; module ownership annotations in source should be preserved.
 
-## Current Progress
-- CARLA environment configured
-- UAV and UGV controllers implemented
-- LiDAR-based obstacle avoidance added
-- Message broker for communication working
-- Data logging system implemented
+- Evan Frisone — Team Leader, Computer Science
+- Omar Elharbili — Computer Science
+- Sean Bowden — Computer Science
+- Roberson Robert — Team Member
+- Syeda Haque — Computer Science
 
-## Future Work
-- Advanced UAV–UGV coordination strategies
-- Real-time path planning algorithms
-- Multi-agent scaling
-- Improved sensor fusion
-- Visualization/dashboard for analytics
+Sponsor / mentor: Dr. Xiangnan Zhong, Florida Atlantic University.
 
-## Team Members
-- **Evan Frisone** – Team Leader, Computer Science
-- **Omar Elharbili** – Computer Science
-- **Sean Bowden** – Computer Science
-- **Roberson Robert** – Team Member
-- **Syeda Haque** – Computer Science
-
-## Sponsor / Mentor
-**Dr. Xiangnan Zhong**  
-Email: xzhong@fau.edu
-
-## Institution
-Florida Atlantic University
-
-
-## Notes
-This project is part of a collaborative academic initiative focused on autonomous systems, robotics simulation, and intelligent transportation research.
+No license file is currently included; no open-source license is asserted here.
